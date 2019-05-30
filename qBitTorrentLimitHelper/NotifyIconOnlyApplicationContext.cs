@@ -1,5 +1,8 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using qBitTorrentLimitHelper.Models;
 using qBitTorrentLimitHelper.Resources;
@@ -14,6 +17,7 @@ namespace qBitTorrentLimitHelper
 
         private IWebApiConnector _webApiConnector;
         private Configuration _configuration;
+        private Guid _lastMouseClickGuid;
 
         private const int BalloonTipTimeout = 1000;
 
@@ -27,6 +31,9 @@ namespace qBitTorrentLimitHelper
                 _notifyIcon.Icon = value ? Icons.Limit : Icons.NoLimit;
             }
         }
+
+        [DllImport("user32.dll")]
+        static extern uint GetDoubleClickTime();
 
         internal NotifyIconOnlyApplicationContext()
         {
@@ -46,9 +53,7 @@ namespace qBitTorrentLimitHelper
                 _notifyIcon.ShowBalloonTip(BalloonTipTimeout, Constants.Error, Constants.UnableToLoadConfigurationFromFile, ToolTipIcon.Error);
             }
 
-            _notifyIcon.Click += ToggleLimit;
-            _notifyIcon.DoubleClick += SetAllDownloadingTorrentsToSequenceDownload;
-            _notifyIcon.DoubleClick += SetAllDownloadingTorrentsToPrioritizeFirstLastPiece;
+            _notifyIcon.MouseDown += ManageMouseClick;
 
             Initialize();
         }
@@ -95,59 +100,83 @@ namespace qBitTorrentLimitHelper
             return contextMenuStrip;
         }
 
-        private void ToggleLimit(object sender, EventArgs eventArgs)
+        private void ManageMouseClick(object sender, MouseEventArgs eventArgs)
         {
-            EnsureEventIsLeftMouseButton(eventArgs, () =>
+            if (eventArgs.Button != MouseButtons.Left)
             {
-                var limit = _webApiConnector.GetCurrentGlobalLimit();
+                return;
+            }
 
-                if (limit == 0)
+            if (eventArgs.Clicks == 1)
+            {
+                var mouseClickGuid = Guid.NewGuid();
+                _lastMouseClickGuid = mouseClickGuid;
+
+                Task.Run(async () =>
                 {
-                    SetLimit(_configuration.DefaultLimitBytes);
+                    await Task.Delay((int)GetDoubleClickTime());
+
+                    if (mouseClickGuid == _lastMouseClickGuid)
+                    {
+                        SingleClickAction();
+                    }
+                });
+
+                return;
+            }
+
+            _lastMouseClickGuid = Guid.NewGuid();
+
+            DoubleClickAction();
+        }
+
+        private void SingleClickAction()
+        {
+            ToggleLimit();
+        }
+
+        private void DoubleClickAction()
+        {
+            SetAllDownloadingTorrentsToSequenceDownload();
+            SetAllDownloadingTorrentsToPrioritizeFirstLastPiece();
+        }
+
+        private void ToggleLimit()
+        {
+            var limit = _webApiConnector.GetCurrentGlobalLimit();
+
+            if (limit == 0)
+            {
+                SetLimit(_configuration.DefaultLimitBytes);
+            }
+            else
+            {
+                _webApiConnector.SetCurrentGlobalLimit(0);
+
+                var currentLimit = _webApiConnector.GetCurrentGlobalLimit();
+
+                if (currentLimit != 0)
+                {
+                    _notifyIcon.ShowBalloonTip(BalloonTipTimeout, Constants.Error, Constants.FailedToRemoveLimit,
+                        ToolTipIcon.Error);
                 }
                 else
                 {
-                    _webApiConnector.SetCurrentGlobalLimit(0);
-
-                    var currentLimit = _webApiConnector.GetCurrentGlobalLimit();
-
-                    if (currentLimit != 0)
-                    {
-                        _notifyIcon.ShowBalloonTip(BalloonTipTimeout, Constants.Error, Constants.FailedToRemoveLimit,
-                            ToolTipIcon.Error);
-                    }
-                    else
-                    {
-                        IsLimitEnabled = false;
-                    }
+                    IsLimitEnabled = false;
                 }
-            });
-        }
-
-        private void SetAllDownloadingTorrentsToPrioritizeFirstLastPiece(object sender, EventArgs eventArgs)
-        {
-            EnsureEventIsLeftMouseButton(eventArgs, () =>
-            {
-                var torrentHashes = _webApiConnector.GetDownloadingTorrentHashesWithDisabledSequentialDownload();
-                _webApiConnector.ToggleSequentialDownload(torrentHashes);
-            });
-        }
-
-        private void SetAllDownloadingTorrentsToSequenceDownload(object sender, EventArgs eventArgs)
-        {
-            EnsureEventIsLeftMouseButton(eventArgs, () =>
-            {
-                var torrentHashes = _webApiConnector.GetDownloadingTorrentHashesWithDisabledFirstLastPartPriority();
-                _webApiConnector.ToggleFirstLastPiecePriority(torrentHashes);
-            });
-        }
-
-        private void EnsureEventIsLeftMouseButton(EventArgs eventArgs, Action action)
-        {
-            if (eventArgs is MouseEventArgs mouseEventArgs && mouseEventArgs.Button == MouseButtons.Left)
-            {
-                action.Invoke();
             }
+        }
+
+        private void SetAllDownloadingTorrentsToPrioritizeFirstLastPiece()
+        {
+            var torrentHashes = _webApiConnector.GetDownloadingTorrentHashesWithDisabledSequentialDownload();
+            _webApiConnector.ToggleSequentialDownload(torrentHashes);
+        }
+
+        private void SetAllDownloadingTorrentsToSequenceDownload()
+        {
+            var torrentHashes = _webApiConnector.GetDownloadingTorrentHashesWithDisabledFirstLastPartPriority();
+            _webApiConnector.ToggleFirstLastPiecePriority(torrentHashes);
         }
 
         private void SetHighLimit(object sender, EventArgs eventArgs)
